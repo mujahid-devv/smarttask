@@ -1,11 +1,11 @@
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from app.core.settings import settings
 
-# Engine
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=True,
@@ -20,6 +20,10 @@ AsyncSessionLocal = async_sessionmaker(
 
 class Base(DeclarativeBase):
     pass
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
