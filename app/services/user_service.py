@@ -15,8 +15,9 @@ async def create_user(db: AsyncSession, user_data: UserCreate) -> User:
     user = User(
         email=user_data.email,
         password_hash=get_password_hash(user_data.password),
+        full_name=user_data.full_name,
     )
     db.add(user)
-    await db.flush()  # sends INSERT, gets the id back, stays in transaction
-    await db.refresh(user)  # loads the full row (created_at, is_active, etc.)
+    await db.flush()
+    await db.refresh(user)
     return user

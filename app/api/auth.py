@@ -26,7 +26,7 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
 @router.post("/login", response_model=TokenResponse)
 async def login(credentials: UserLogin, db: AsyncSession = Depends(get_db)):
     user = await get_user_by_email(db, credentials.email)
-    if not user or not verify_password(credentials.password, user.hashed_password):
+    if not user or not verify_password(credentials.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
