@@ -1,12 +1,13 @@
 from fastapi import FastAPI
 
-from app.api import auth
+from app.api import auth, users
 
 app = FastAPI(
     title="SmartTask API",
     version="0.1.0",
 )
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
+app.include_router(users.router, prefix="/users", tags=["users"])
 
 
 @app.get("/")
