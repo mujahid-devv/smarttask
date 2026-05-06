@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Project, ProjectMember, User
-from app.models.enums import MemberRole
+from app.models.enums import MemberRole, ProjectStatus
 from app.schemas.member import MemberResponse
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
@@ -145,6 +145,22 @@ async def change_member_role(
     await db.flush()
     await db.refresh(member)
     return member
+
+
+async def archive_project(db: AsyncSession, project: Project) -> Project:
+    project.status = ProjectStatus.ARCHIVED
+    project.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    await db.refresh(project)
+    return project
+
+
+async def unarchive_project(db: AsyncSession, project: Project) -> Project:
+    project.status = ProjectStatus.ACTIVE
+    project.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    await db.refresh(project)
+    return project
 
 
 async def soft_delete_project(

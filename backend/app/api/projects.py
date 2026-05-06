@@ -8,10 +8,11 @@ from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.projects import require_project_role
 from app.models import ProjectMember, User
-from app.models.enums import MemberRole
+from app.models.enums import MemberRole, ProjectStatus
 from app.schemas.member import AddMemberRequest, MemberResponse, MemberRoleUpdate
 from app.schemas.project import ProjectCreate, ProjectResponse, ProjectUpdate
 from app.services.project_service import add_member as svc_add_member
+from app.services.project_service import archive_project
 from app.services.project_service import change_member_role as svc_change_member_role
 from app.services.project_service import (
     create_project,
@@ -21,7 +22,11 @@ from app.services.project_service import (
     get_project_members,
 )
 from app.services.project_service import remove_member as svc_remove_member
-from app.services.project_service import soft_delete_project, update_project
+from app.services.project_service import (
+    soft_delete_project,
+    unarchive_project,
+    update_project,
+)
 from app.services.user_service import get_user_by_id
 
 router = APIRouter()
@@ -252,3 +257,38 @@ async def change_member_role(
         role=updated.role,
         joined_at=updated.created_at,
     )
+
+
+# ── Archive / Unarchive
+
+
+@router.post("/{project_id}/archive", response_model=ProjectResponse)
+async def archive_project_route(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: ProjectMember | None = Depends(require_project_role(MemberRole.OWNER)),
+):
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+
+    if project.status == ProjectStatus.ARCHIVED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Project is already archived")
+
+    return await archive_project(db, project)
+
+
+@router.post("/{project_id}/unarchive", response_model=ProjectResponse)
+async def unarchive_project_route(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: ProjectMember | None = Depends(require_project_role(MemberRole.OWNER)),
+):
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+
+    if project.status != ProjectStatus.ARCHIVED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Project unarchived")
+
+    return await unarchive_project(db, project)
