@@ -4,8 +4,9 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Project, ProjectMember
+from app.models import Project, ProjectMember, User
 from app.models.enums import MemberRole
+from app.schemas.member import MemberResponse
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
 
@@ -82,10 +83,74 @@ async def update_project(
     return project
 
 
+async def get_project_member(
+    db: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID
+) -> ProjectMember | None:
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def add_member(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: MemberRole,
+) -> ProjectMember:
+    member = ProjectMember(project_id=project_id, user_id=user_id, role=role)
+    db.add(member)
+    await db.flush()
+    await db.refresh(member)
+    return member
+
+
+async def get_project_members(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+) -> list[MemberResponse]:
+    result = await db.execute(
+        select(ProjectMember, User)
+        .join(User, ProjectMember.user_id == User.id)
+        .where(
+            ProjectMember.project_id == project_id,
+            User.is_deleted.is_(False),
+        )
+    )
+
+    return [
+        MemberResponse(
+            user_id=user.id,
+            full_name=user.full_name,
+            email=user.email,
+            role=member.role,
+            joined_at=member.created_at,
+        )
+        for member, user in result.all()
+    ]
+
+
+async def remove_member(db: AsyncSession, member: ProjectMember) -> None:
+    await db.delete(member)
+    await db.flush()
+
+
+async def change_member_role(
+    db: AsyncSession, member: ProjectMember, role: MemberRole
+) -> ProjectMember:
+    member.role = role
+    await db.flush()
+    await db.refresh(member)
+    return member
+
+
 async def soft_delete_project(
     db: AsyncSession,
     project: Project,
 ) -> None:
     project.is_deleted = True
     project.deleted_at = datetime.now(timezone.utc)
-    await db.commit()
+    await db.flush()

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api import auth, users, projects
+from app.api import auth, projects, users
 
 app = FastAPI(
     title="SmartTask API",
