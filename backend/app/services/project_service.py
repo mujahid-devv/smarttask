@@ -21,20 +21,26 @@ async def get_project_by_id(db: AsyncSession, project_id: uuid.UUID) -> Project 
 
 
 async def get_all_projects(
-    db: AsyncSession, user_id: uuid.UUID, skip: int = 0, limit: int = 10
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    skip: int = 0,
+    limit: int = 10,
+    include_archived: bool = False,
 ) -> list[Project]:
-    """
-    Get all projects for a user where they are a member.
-    """
     query = (
         select(Project)
         .join(ProjectMember, Project.id == ProjectMember.project_id)
         .where(
-            ProjectMember.user_id == user_id, Project.is_deleted == False  # noqa: E712
-        )  # noqa:E712
+            ProjectMember.user_id == user_id,
+            Project.is_deleted == False,  # noqa: E712
+        )
         .offset(skip)
         .limit(limit)
     )
+
+    if not include_archived:
+        query = query.where(Project.status != ProjectStatus.ARCHIVED)
+
     result = await db.execute(query)
     return list(result.scalars().all())
 

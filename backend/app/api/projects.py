@@ -46,12 +46,17 @@ async def create_new_project(
 async def list_projects(
     skip: int = 0,
     limit: int = 20,
+    include_archived: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List all projects for the authenticated user."""
     projects = await get_all_projects(
-        db=db, user_id=current_user.id, skip=skip, limit=limit
+        db=db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
+        include_archived=include_archived,
     )
     if not projects:
         raise HTTPException(

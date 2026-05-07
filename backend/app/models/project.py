@@ -47,3 +47,4 @@ class Project(Base):
     owner = relationship("User", back_populates="projects")
     members = relationship("ProjectMember", back_populates="project")
     tasks = relationship("Task", back_populates="project")
+    comments = relationship("Comment", back_populates="project")
