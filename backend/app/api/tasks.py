@@ -11,10 +11,10 @@ from app.models.enums import MemberRole, TaskPriority, TaskStatus
 from app.schemas.task import TaskCreate, TaskResponse, TaskUpdate
 from app.services.task_service import (
     create_task,
+    delete_task_by_id,
     get_project_tasks,
     get_task_by_id,
-    soft_delete_task,
-    update_task,
+    update_task_by_id,
 )
 
 router = APIRouter()
@@ -93,13 +93,15 @@ async def update_task_route(
     ),
 ):
     """requires project OWNER or EDITOR role."""
-    task = await get_task_by_id(db, task_id=task_id, project_id=project_id)
+    task = await update_task_by_id(
+        db, project_id=project_id, task_id=task_id, data=data
+    )
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found",
         )
-    return await update_task(db, task, data)
+    return task
 
 
 #  Delete task
@@ -115,10 +117,9 @@ async def delete_task(
     ),
 ):
     """requires project OWNER, EDITOR/system-admin role"""
-    task = await get_task_by_id(db, task_id=task_id, project_id=project_id)
-    if not task:
+    task_deleted = await delete_task_by_id(db, project_id=project_id, task_id=task_id)
+    if not task_deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found",
         )
-    await soft_delete_task(db, task)
