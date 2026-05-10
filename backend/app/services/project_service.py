@@ -1,23 +1,28 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Project, ProjectMember, User
-from app.models.enums import MemberRole, ProjectStatus
+from app.models.enums import MemberRole, ProjectStatus, UserRole
+from app.repositories import project_repository
 from app.schemas.member import MemberResponse
 from app.schemas.project import ProjectCreate, ProjectUpdate
+from app.services.user_service import get_user_by_id
+
+
+def _member_response(member: ProjectMember, user) -> MemberResponse:
+    return MemberResponse(
+        user_id=user.id,
+        full_name=user.full_name,
+        email=user.email,
+        role=member.role,
+        joined_at=member.created_at,
+    )
 
 
 async def get_project_by_id(db: AsyncSession, project_id: uuid.UUID) -> Project | None:
-
-    result = await db.execute(
-        select(Project).where(
-            Project.id == project_id, Project.is_deleted == False  # noqa: E712
-        )
-    )
-    return result.scalar_one_or_none()
+    return await project_repository.get_project_by_id(db, project_id)
 
 
 async def get_all_projects(
@@ -27,22 +32,13 @@ async def get_all_projects(
     limit: int = 10,
     include_archived: bool = False,
 ) -> list[Project]:
-    query = (
-        select(Project)
-        .join(ProjectMember, Project.id == ProjectMember.project_id)
-        .where(
-            ProjectMember.user_id == user_id,
-            Project.is_deleted == False,  # noqa: E712
-        )
-        .offset(skip)
-        .limit(limit)
+    return await project_repository.get_user_projects(
+        db,
+        user_id=user_id,
+        skip=skip,
+        limit=limit,
+        include_archived=include_archived,
     )
-
-    if not include_archived:
-        query = query.where(Project.status != ProjectStatus.ARCHIVED)
-
-    result = await db.execute(query)
-    return list(result.scalars().all())
 
 
 async def create_project(
@@ -50,7 +46,8 @@ async def create_project(
     owner_id: uuid.UUID,
     data: ProjectCreate,
 ) -> Project:
-    project = Project(
+    project = await project_repository.create_project(
+        db,
         owner_id=owner_id,
         name=data.name,
         description=data.description,
@@ -59,18 +56,12 @@ async def create_project(
         start_date=data.start_date,
         end_date=data.end_date,
     )
-    db.add(project)
-    await db.flush()
-
-    member = ProjectMember(
+    await project_repository.create_project_member(
+        db,
         project_id=project.id,
         user_id=owner_id,
         role=MemberRole.OWNER,
     )
-    db.add(member)
-    await db.flush()
-
-    await db.refresh(project)
     return project
 
 
@@ -83,22 +74,57 @@ async def update_project(
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(project, field, value)
 
-    project.updated_at = datetime.now(timezone.utc)
-    await db.flush()
-    await db.refresh(project)
-    return project
+    return await project_repository.save_project(db, project)
+
+
+async def get_project_for_user(
+    db: AsyncSession, project_id: uuid.UUID, current_user: User
+) -> tuple[Project | None, str | None]:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return None, "Project not found"
+
+    if current_user.role == UserRole.ADMIN:
+        return project, None
+
+    member = await get_project_member(db, project_id, current_user.id)
+    if not member:
+        return None, "You do not have access to this project"
+
+    return project, None
+
+
+async def update_project_for_user(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    current_user: User,
+    data: ProjectUpdate,
+) -> tuple[Project | None, str | None]:
+    project, error = await get_project_for_user(db, project_id, current_user)
+    if error:
+        return None, error
+
+    return await update_project(db, project, data), None
+
+
+async def delete_project_for_owner(
+    db: AsyncSession, project_id: uuid.UUID, owner_id: uuid.UUID
+) -> str | None:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return "Project not found"
+
+    if project.owner_id != owner_id:
+        return "Only the project owner can delete this project"
+
+    await soft_delete_project(db, project)
+    return None
 
 
 async def get_project_member(
     db: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID
 ) -> ProjectMember | None:
-    result = await db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == user_id,
-        )
-    )
-    return result.scalar_one_or_none()
+    return await project_repository.get_project_member(db, project_id, user_id)
 
 
 async def add_member(
@@ -107,66 +133,134 @@ async def add_member(
     user_id: uuid.UUID,
     role: MemberRole,
 ) -> ProjectMember:
-    member = ProjectMember(project_id=project_id, user_id=user_id, role=role)
-    db.add(member)
-    await db.flush()
-    await db.refresh(member)
-    return member
+    return await project_repository.create_project_member(
+        db,
+        project_id=project_id,
+        user_id=user_id,
+        role=role,
+    )
 
 
 async def get_project_members(
     db: AsyncSession,
     project_id: uuid.UUID,
 ) -> list[MemberResponse]:
-    result = await db.execute(
-        select(ProjectMember, User)
-        .join(User, ProjectMember.user_id == User.id)
-        .where(
-            ProjectMember.project_id == project_id,
-            User.is_deleted.is_(False),
-        )
-    )
+    rows = await project_repository.get_project_members_with_users(db, project_id)
 
-    return [
-        MemberResponse(
-            user_id=user.id,
-            full_name=user.full_name,
-            email=user.email,
-            role=member.role,
-            joined_at=member.created_at,
-        )
-        for member, user in result.all()
-    ]
+    return [_member_response(member, user) for member, user in rows]
+
+
+async def add_project_member(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: MemberRole,
+) -> tuple[MemberResponse | None, str | None]:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return None, "Project not found"
+
+    target_user = await get_user_by_id(db, user_id)
+    if not target_user:
+        return None, "User not found"
+
+    existing = await get_project_member(db, project_id, user_id)
+    if existing:
+        return None, "User is already a member of this project"
+
+    member = await add_member(db, project_id, user_id, role)
+    return _member_response(member, target_user), None
+
+
+async def get_project_members_for_project(
+    db: AsyncSession, project_id: uuid.UUID
+) -> tuple[list[MemberResponse] | None, str | None]:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return None, "Project not found"
+
+    return await get_project_members(db, project_id), None
 
 
 async def remove_member(db: AsyncSession, member: ProjectMember) -> None:
-    await db.delete(member)
-    await db.flush()
+    await project_repository.delete_project_member(db, member)
+
+
+async def remove_project_member(
+    db: AsyncSession, project_id: uuid.UUID, user_id: uuid.UUID
+) -> str | None:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return "Project not found"
+
+    if user_id == project.owner_id:
+        return "Cannot remove the project owner"
+
+    member = await get_project_member(db, project_id, user_id)
+    if not member:
+        return "User is not a member of this project"
+
+    await remove_member(db, member)
+    return None
 
 
 async def change_member_role(
     db: AsyncSession, member: ProjectMember, role: MemberRole
 ) -> ProjectMember:
     member.role = role
-    await db.flush()
-    await db.refresh(member)
-    return member
+    return await project_repository.save_project_member(db, member)
 
 
-async def archive_project(db: AsyncSession, project: Project) -> Project:
+async def change_project_member_role(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: MemberRole,
+) -> tuple[MemberResponse | None, str | None]:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return None, "Project not found"
+
+    if user_id == project.owner_id:
+        return None, "Cannot change the project owner's role"
+
+    member = await get_project_member(db, project_id, user_id)
+    if not member:
+        return None, "User is not a member of this project"
+
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None, "User not found"
+
+    updated = await change_member_role(db, member, role)
+    return _member_response(updated, user), None
+
+
+async def archive_project_by_id(
+    db: AsyncSession, project_id: uuid.UUID
+) -> tuple[Project | None, str | None]:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return None, "Project not found"
+
+    if project.status == ProjectStatus.ARCHIVED:
+        return None, "Project is already archived"
     project.status = ProjectStatus.ARCHIVED
-    project.updated_at = datetime.now(timezone.utc)
-    await db.flush()
-    await db.refresh(project)
-    return project
+    return await project_repository.save_project(db, project), None
 
 
-async def unarchive_project(db: AsyncSession, project: Project) -> Project:
+async def unarchive_project_by_id(
+    db: AsyncSession, project_id: uuid.UUID
+) -> tuple[Project | None, str | None]:
+    project = await get_project_by_id(db, project_id)
+    if not project:
+        return None, "Project not found"
+
+    if project.status != ProjectStatus.ARCHIVED:
+        return None, "Project unarchived"
+
     project.status = ProjectStatus.ACTIVE
-    project.updated_at = datetime.now(timezone.utc)
-    await db.flush()
-    await db.refresh(project)
-    return project
+    return await project_repository.save_project(db, project), None
 
 
 async def soft_delete_project(
@@ -175,4 +269,4 @@ async def soft_delete_project(
 ) -> None:
     project.is_deleted = True
     project.deleted_at = datetime.now(timezone.utc)
-    await db.flush()
+    await project_repository.save_changes(db)

@@ -2,15 +2,14 @@ import uuid
 from collections.abc import Callable
 
 from fastapi import Depends, HTTPException, Path, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.models.enums import MemberRole, UserRole
-from app.models.project import Project
 from app.models.project_member import ProjectMember
 from app.models.user import User
+from app.services.project_service import get_project_by_id, get_project_member
 
 
 def require_project_role(*roles: MemberRole) -> Callable:
@@ -19,13 +18,8 @@ def require_project_role(*roles: MemberRole) -> Callable:
         current_user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ) -> ProjectMember | None:
-        project_result = await db.execute(
-            select(Project).where(
-                Project.id == project_id,
-                Project.is_deleted.is_(False),
-            )
-        )
-        if not project_result.scalar_one_or_none():
+        project = await get_project_by_id(db, project_id)
+        if not project:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Project not found",
@@ -35,13 +29,7 @@ def require_project_role(*roles: MemberRole) -> Callable:
         if current_user.role == UserRole.ADMIN:
             return None
 
-        member_result = await db.execute(
-            select(ProjectMember).where(
-                ProjectMember.project_id == project_id,
-                ProjectMember.user_id == current_user.id,
-            )
-        )
-        member = member_result.scalar_one_or_none()
+        member = await get_project_member(db, project_id, current_user.id)
 
         if not member:
             raise HTTPException(

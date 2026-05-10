@@ -1,33 +1,28 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.projects import require_project_role
 from app.models import ProjectMember, User
-from app.models.enums import MemberRole, ProjectStatus
+from app.models.enums import MemberRole
 from app.schemas.member import AddMemberRequest, MemberResponse, MemberRoleUpdate
 from app.schemas.project import ProjectCreate, ProjectResponse, ProjectUpdate
-from app.services.project_service import add_member as svc_add_member
-from app.services.project_service import archive_project
-from app.services.project_service import change_member_role as svc_change_member_role
 from app.services.project_service import (
+    add_project_member,
+    archive_project_by_id,
+    change_project_member_role,
     create_project,
+    delete_project_for_owner,
     get_all_projects,
-    get_project_by_id,
-    get_project_member,
-    get_project_members,
+    get_project_for_user,
+    get_project_members_for_project,
+    remove_project_member,
+    unarchive_project_by_id,
+    update_project_for_user,
 )
-from app.services.project_service import remove_member as svc_remove_member
-from app.services.project_service import (
-    soft_delete_project,
-    unarchive_project,
-    update_project,
-)
-from app.services.user_service import get_user_by_id
 
 router = APIRouter()
 
@@ -72,24 +67,16 @@ async def get_project(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
+    project, error = await get_project_for_user(db, project_id, current_user)
+    if error == "Project not found":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found",
+            detail=error,
         )
-
-    # check user is a member of the project
-    membership = await db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == current_user.id,
-        )
-    )
-    if not membership.scalar_one_or_none():
+    if error:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this project",
+            detail=error,
         )
 
     return project
@@ -102,27 +89,21 @@ async def update_project_route(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
+    project, error = await update_project_for_user(
+        db, project_id, current_user, data
+    )
+    if error == "Project not found":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found",
+            detail=error,
         )
-
-    # check user is a member of the project
-    membership = await db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == current_user.id,
-        )
-    )
-    if not membership.scalar_one_or_none():
+    if error:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this project",
+            detail=error,
         )
 
-    return await update_project(db, project, data)
+    return project
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -134,21 +115,17 @@ async def delete_project(
     """
     Soft delete a project.[Project owner only]
     """
-    project = await get_project_by_id(db, project_id)
-    if not project:
+    error = await delete_project_for_owner(db, project_id, current_user.id)
+    if error == "Project not found":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found",
+            detail=error,
         )
-
-    # Ownership check
-    if project.owner_id != current_user.id:
+    if error:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the project owner can delete this project",
+            detail=error,
         )
-
-    await soft_delete_project(db, project)
 
 
 # Member management
@@ -164,30 +141,14 @@ async def add_member(
     data: AddMemberRequest,
     db: AsyncSession = Depends(get_db),
     _: ProjectMember | None = Depends(require_project_role(MemberRole.OWNER)),
-    current_user: User = Depends(get_current_user),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+    member, error = await add_project_member(db, project_id, data.user_id, data.role)
+    if error == "Project not found" or error == "User not found":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, error)
+    if error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, error)
 
-    target_user = await get_user_by_id(db, data.user_id)
-    if not target_user:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-
-    existing = await get_project_member(db, project_id, data.user_id)
-    if existing:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "User is already a member of this project"
-        )
-
-    member = await svc_add_member(db, project_id, data.user_id, data.role)
-    return MemberResponse(
-        user_id=target_user.id,
-        full_name=target_user.full_name,
-        email=target_user.email,
-        role=member.role,
-        joined_at=member.created_at,
-    )
+    return member
 
 
 @router.get("/{project_id}/members", response_model=list[MemberResponse])
@@ -196,11 +157,11 @@ async def list_members(
     db: AsyncSession = Depends(get_db),
     _: ProjectMember | None = Depends(require_project_role()),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+    members, error = await get_project_members_for_project(db, project_id)
+    if error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, error)
 
-    return await get_project_members(db, project_id)
+    return members
 
 
 @router.delete(
@@ -212,22 +173,11 @@ async def remove_member(
     db: AsyncSession = Depends(get_db),
     _: ProjectMember | None = Depends(require_project_role(MemberRole.OWNER)),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
-
-    if user_id == project.owner_id:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Cannot remove the project owner"
-        )
-
-    member = await get_project_member(db, project_id, user_id)
-    if not member:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "User is not a member of this project"
-        )
-
-    await svc_remove_member(db, member)
+    error = await remove_project_member(db, project_id, user_id)
+    if error == "Project not found" or error == "User is not a member of this project":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, error)
+    if error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, error)
 
 
 @router.patch("/{project_id}/members/{user_id}/role", response_model=MemberResponse)
@@ -238,30 +188,17 @@ async def change_member_role(
     db: AsyncSession = Depends(get_db),
     _: ProjectMember | None = Depends(require_project_role(MemberRole.OWNER)),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+    member, error = await change_project_member_role(db, project_id, user_id, data.role)
+    if error in {
+        "Project not found",
+        "User is not a member of this project",
+        "User not found",
+    }:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, error)
+    if error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, error)
 
-    if user_id == project.owner_id:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Cannot change the project owner's role"
-        )
-
-    member = await get_project_member(db, project_id, user_id)
-    if not member:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "User is not a member of this project"
-        )
-
-    updated = await svc_change_member_role(db, member, data.role)
-    user = await get_user_by_id(db, user_id)
-    return MemberResponse(
-        user_id=user.id,
-        full_name=user.full_name,
-        email=user.email,
-        role=updated.role,
-        joined_at=updated.created_at,
-    )
+    return member
 
 
 # ── Archive / Unarchive
@@ -273,14 +210,13 @@ async def archive_project_route(
     db: AsyncSession = Depends(get_db),
     _: ProjectMember | None = Depends(require_project_role(MemberRole.OWNER)),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+    project, error = await archive_project_by_id(db, project_id)
+    if error == "Project not found":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, error)
+    if error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, error)
 
-    if project.status == ProjectStatus.ARCHIVED:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Project is already archived")
-
-    return await archive_project(db, project)
+    return project
 
 
 @router.post("/{project_id}/unarchive", response_model=ProjectResponse)
@@ -289,11 +225,10 @@ async def unarchive_project_route(
     db: AsyncSession = Depends(get_db),
     _: ProjectMember | None = Depends(require_project_role(MemberRole.OWNER)),
 ):
-    project = await get_project_by_id(db, project_id)
-    if not project:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+    project, error = await unarchive_project_by_id(db, project_id)
+    if error == "Project not found":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, error)
+    if error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, error)
 
-    if project.status != ProjectStatus.ARCHIVED:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Project unarchived")
-
-    return await unarchive_project(db, project)
+    return project
