@@ -1,15 +1,19 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.comment import Comment
+from app.models.enums import UserRole
+from app.models.user import User
+from app.repositories import comment_repository
 from app.schemas.comment import CommentCreate, CommentResponse, CommentUpdate
+from app.services.task_service import get_task_by_id
 
 
-def _to_response(comment: Comment, replies: list[CommentResponse] = []) -> CommentResponse:
+def _to_response(
+    comment: Comment, replies: list[CommentResponse] = []
+) -> CommentResponse:
     return CommentResponse(
         id=comment.id,
         author_id=comment.author_id,
@@ -26,15 +30,7 @@ async def get_comment_by_id(
     db: AsyncSession,
     comment_id: uuid.UUID,
 ) -> Comment | None:
-    result = await db.execute(
-        select(Comment)
-        .options(selectinload(Comment.author))
-        .where(
-            Comment.id == comment_id,
-            Comment.is_deleted.is_(False),
-        )
-    )
-    return result.scalar_one_or_none()
+    return await comment_repository.get_comment_by_id(db, comment_id)
 
 
 async def create_comment(
@@ -45,22 +41,74 @@ async def create_comment(
     task_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
 ) -> CommentResponse:
-    comment = Comment(
+    comment = await comment_repository.create_comment(
+        db,
         author_id=author_id,
         task_id=task_id,
         project_id=project_id,
         parent_id=data.parent_id,
         body=data.body,
     )
-    db.add(comment)
-    await db.flush()
+    comment = await comment_repository.get_comment_with_author(db, comment.id)
+    return _to_response(comment, replies=[])
 
-    result = await db.execute(
-        select(Comment)
-        .options(selectinload(Comment.author))
-        .where(Comment.id == comment.id)
-    )
-    return _to_response(result.scalar_one(), replies=[])
+
+async def create_task_comment(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    task_id: uuid.UUID,
+    current_user: User,
+    data: CommentCreate,
+) -> tuple[CommentResponse | None, str | None]:
+    task = await get_task_by_id(db, task_id, project_id)
+    if not task:
+        return None, "Task not found"
+
+    if data.parent_id:
+        parent_error = await validate_parent_comment(
+            db, data.parent_id, task_id=task_id, project_id=None
+        )
+        if parent_error:
+            return None, parent_error
+
+    return await create_comment(db, current_user.id, data, task_id=task_id), None
+
+
+async def create_project_comment(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    current_user: User,
+    data: CommentCreate,
+) -> tuple[CommentResponse | None, str | None]:
+    if data.parent_id:
+        parent_error = await validate_parent_comment(
+            db, data.parent_id, task_id=None, project_id=project_id
+        )
+        if parent_error:
+            return None, parent_error
+
+    return await create_comment(db, current_user.id, data, project_id=project_id), None
+
+
+async def validate_parent_comment(
+    db: AsyncSession,
+    parent_id: uuid.UUID,
+    *,
+    task_id: uuid.UUID | None,
+    project_id: uuid.UUID | None,
+) -> str | None:
+    parent = await get_comment_by_id(db, parent_id)
+    if not parent:
+        return "Parent comment not found"
+    if parent.parent_id is not None:
+        return "Cannot reply to a reply"
+    if task_id is not None and parent.task_id != task_id:
+        return "Parent comment does not belong to this task"
+    if project_id is not None and parent.project_id != project_id:
+        return "Parent comment does not belong to this project"
+    return None
 
 
 async def get_comment_thread(
@@ -71,16 +119,38 @@ async def get_comment_thread(
     if not parent:
         return None
 
-    replies_result = await db.execute(
-        select(Comment)
-        .options(selectinload(Comment.author))
-        .where(
-            Comment.parent_id == comment_id,
-            Comment.is_deleted.is_(False),
-        )
-        .order_by(Comment.created_at.asc())
-    )
-    replies = [_to_response(r) for r in replies_result.scalars().all()]
+    replies = [
+        _to_response(reply)
+        for reply in await comment_repository.get_replies(db, comment_id)
+    ]
+    return _to_response(parent, replies=replies)
+
+
+async def get_task_comment_thread(
+    db: AsyncSession, comment_id: uuid.UUID, task_id: uuid.UUID
+) -> CommentResponse | None:
+    parent = await get_comment_by_id(db, comment_id)
+    if not parent or parent.task_id != task_id:
+        return None
+
+    replies = [
+        _to_response(reply)
+        for reply in await comment_repository.get_replies(db, comment_id)
+    ]
+    return _to_response(parent, replies=replies)
+
+
+async def get_project_comment_thread(
+    db: AsyncSession, comment_id: uuid.UUID, project_id: uuid.UUID
+) -> CommentResponse | None:
+    parent = await get_comment_by_id(db, comment_id)
+    if not parent or parent.project_id != project_id:
+        return None
+
+    replies = [
+        _to_response(reply)
+        for reply in await comment_repository.get_replies(db, comment_id)
+    ]
     return _to_response(parent, replies=replies)
 
 
@@ -90,35 +160,22 @@ async def get_comments(
     task_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
 ) -> list[CommentResponse]:
-    top_level_result = await db.execute(
-        select(Comment)
-        .options(selectinload(Comment.author))
-        .where(
-            Comment.task_id == task_id,
-            Comment.project_id == project_id,
-            Comment.parent_id.is_(None),
-            Comment.is_deleted.is_(False),
-        )
-        .order_by(Comment.created_at.asc())
+    top_level = await comment_repository.get_top_level_comments(
+        db,
+        task_id=task_id,
+        project_id=project_id,
     )
-    top_level = list(top_level_result.scalars().all())
 
     if not top_level:
         return []
 
     top_level_ids = [c.id for c in top_level]
-    replies_result = await db.execute(
-        select(Comment)
-        .options(selectinload(Comment.author))
-        .where(
-            Comment.task_id == task_id,
-            Comment.project_id == project_id,
-            Comment.parent_id.in_(top_level_ids),
-            Comment.is_deleted.is_(False),
-        )
-        .order_by(Comment.created_at.asc())
+    replies = await comment_repository.get_replies_for_comments(
+        db,
+        parent_ids=top_level_ids,
+        task_id=task_id,
+        project_id=project_id,
     )
-    replies = list(replies_result.scalars().all())
 
     replies_map: dict[uuid.UUID, list[CommentResponse]] = {}
     for reply in replies:
@@ -134,30 +191,65 @@ async def edit_comment(
 ) -> CommentResponse:
     comment.body = data.body
     comment.updated_at = datetime.now(timezone.utc)
-    await db.flush()
+    await comment_repository.save_comment(db, comment)
 
-    result = await db.execute(
-        select(Comment)
-        .options(selectinload(Comment.author))
-        .where(Comment.id == comment.id)
-    )
-    return _to_response(result.scalar_one(), replies=[])
+    comment = await comment_repository.get_comment_with_author(db, comment.id)
+    return _to_response(comment, replies=[])
+
+
+async def edit_scoped_comment(
+    db: AsyncSession,
+    *,
+    comment_id: uuid.UUID,
+    current_user: User,
+    data: CommentUpdate,
+    task_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+) -> tuple[CommentResponse | None, str | None]:
+    comment = await get_comment_by_id(db, comment_id)
+    if not comment:
+        return None, "Comment not found"
+    if task_id is not None and comment.task_id != task_id:
+        return None, "Comment not found"
+    if project_id is not None and comment.project_id != project_id:
+        return None, "Comment not found"
+    if comment.author_id != current_user.id and current_user.role != UserRole.ADMIN:
+        return None, "You can only edit your own comments"
+
+    return await edit_comment(db, comment, data), None
 
 
 async def delete_comment(db: AsyncSession, comment: Comment) -> None:
     now = datetime.now(timezone.utc)
 
     if comment.parent_id is None:
-        replies_result = await db.execute(
-            select(Comment).where(
-                Comment.parent_id == comment.id,
-                Comment.is_deleted.is_(False),
-            )
-        )
-        for reply in replies_result.scalars().all():
+        replies = await comment_repository.get_replies(db, comment.id)
+        for reply in replies:
             reply.is_deleted = True
             reply.deleted_at = now
 
     comment.is_deleted = True
     comment.deleted_at = now
-    await db.flush()
+    await comment_repository.save_changes(db)
+
+
+async def delete_scoped_comment(
+    db: AsyncSession,
+    *,
+    comment_id: uuid.UUID,
+    current_user: User,
+    task_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+) -> str | None:
+    comment = await get_comment_by_id(db, comment_id)
+    if not comment:
+        return "Comment not found"
+    if task_id is not None and comment.task_id != task_id:
+        return "Comment not found"
+    if project_id is not None and comment.project_id != project_id:
+        return "Comment not found"
+    if comment.author_id != current_user.id and current_user.role != UserRole.ADMIN:
+        return "You can only delete your own comments"
+
+    await delete_comment(db, comment)
+    return None
