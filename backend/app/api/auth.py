@@ -2,16 +2,25 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.email import send_reset_email
 from app.core.security import create_access_token, create_refresh_token, verify_password
 from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.schemas.user import (
     MessageResponse,
+    PasswordResetConfirm,
+    PasswordResetRequest,
     RefreshTokenRequest,
     TokenResponse,
     UserCreate,
     UserLogin,
     UserResponse,
+)
+from app.services.password_reset_service import (
+    create_otp,
+    get_valid_otp,
+    mark_otp_used,
+    update_user_password,
 )
 from app.services.token_service import (
     revoke_refresh_token,
@@ -108,3 +117,33 @@ async def logout(body: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
 async def get_me(current_user: User = Depends(get_current_user)):
     """Protected endpoint — returns the authenticated user's info."""
     return current_user
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+async def forgot_password(
+    request: PasswordResetRequest, db: AsyncSession = Depends(get_db)
+):
+    user = await get_user_by_email(db, request.email)
+    if user:
+        otp = await create_otp(db, user)
+        await send_reset_email(user.email, otp)
+
+    return MessageResponse(detail="OTP has been sent to your email.")
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+async def reset_password(
+    request: PasswordResetConfirm, db: AsyncSession = Depends(get_db)
+):
+    reset_token = await get_valid_otp(db, request.email, request.otp)
+    if not reset_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP",
+        )
+
+    user = await get_user_by_id(db, reset_token.user_id)
+    await update_user_password(db, user, request.new_password)
+    await mark_otp_used(db, reset_token)
+
+    return MessageResponse(detail="Password reset successful")

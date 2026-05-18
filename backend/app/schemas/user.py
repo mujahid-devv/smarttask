@@ -34,3 +34,13 @@ class RefreshTokenRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     detail: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
