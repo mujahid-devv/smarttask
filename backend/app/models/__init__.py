@@ -1,3 +1,4 @@
+from .comment import Comment
 from .project import Project
 from .project_member import ProjectMember
 from .task import Task
@@ -13,4 +14,5 @@ __all__ = [
     "PasswordResetToken",
     "ProjectMember",
     "TaskAssignee",
+    "Comment",
 ]

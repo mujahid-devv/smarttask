@@ -46,3 +46,4 @@ class User(Base):
     project_memberships = relationship("ProjectMember", back_populates="user")
     task_assignments = relationship("TaskAssignee", back_populates="user")
     created_tasks = relationship("Task", back_populates="creator")
+    comments = relationship("Comment", back_populates="author")

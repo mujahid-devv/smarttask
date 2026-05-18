@@ -1,9 +1,12 @@
+from collections.abc import Callable
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.permissions import has_permission
 from app.core.security import decode_access_token
 from app.models.user import User
 from app.services.user_service import get_user_by_email
@@ -40,3 +43,15 @@ async def get_current_user(
         )
 
     return user
+
+
+def require_permission(permission: str) -> Callable:
+    async def dependency(current_user: User = Depends(get_current_user)) -> User:
+        if not has_permission(current_user.role, permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission denied: '{permission}' required",
+            )
+        return current_user
+
+    return dependency

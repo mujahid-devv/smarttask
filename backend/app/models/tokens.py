@@ -44,7 +44,7 @@ class PasswordResetToken(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
 
-    token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    otp_code: Mapped[str] = mapped_column(String(6), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

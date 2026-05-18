@@ -60,3 +60,4 @@ class Task(Base):
     project = relationship("Project", back_populates="tasks")
     creator = relationship("User", back_populates="created_tasks")
     assignees = relationship("TaskAssignee", back_populates="task")
+    comments = relationship("Comment", back_populates="task")
